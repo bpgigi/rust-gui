@@ -1,6 +1,6 @@
 use eframe::{run_native, App, CreationContext, NativeOptions};
 use egui::Context;
-use egui_graphs::{Graph, GraphView, DefaultNodeShape, DefaultEdgeShape, SettingsStyle}; // 引入 SettingsStyle
+use egui_graphs::{Graph, GraphView, DefaultNodeShape, DefaultEdgeShape, SettingsStyle};
 use petgraph::stable_graph::{StableGraph, DefaultIx};
 use petgraph::Directed;
 
@@ -20,13 +20,12 @@ impl BasicApp {
 impl App for BasicApp {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // 配置样式以总是显示标签
             let style_settings = SettingsStyle::new().with_labels_always(true);
             let mut graph_view =
                 GraphView::<String, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::new(
                     &mut self.g,
                 )
-                .with_styles(&style_settings); // 应用样式
+                .with_styles(&style_settings);
             ui.add(&mut graph_view);
         });
     }
