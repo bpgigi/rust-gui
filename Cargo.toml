@@ -6,7 +6,18 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
-egui_graphs = "0.25.1" # 更改为 crates.io 上可用的版本
-egui = "0.31"
-eframe = "0.31"
-petgraph = "0.8"
+egui_graphs = { version = "0.24", features = ["events"] }
+egui = "0.31.0"
+eframe = "0.31.0"
+petgraph = "0.7"
+fdg = { git = "https://github.com/grantshandy/fdg" }
+rand = "0.9" # 与 demo 示例一致
+rustc-hash = "1.1.0" # 修正包名：rustc-hash
+crossbeam-channel = "0.5" # 显式添加 crossbeam-channel
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = [
+    "winuser", "libloaderapi", "ole2", "oleauto", "combaseapi",
+    "shellapi", "shobjidl_core", "wincon", "dwmapi", "uxtheme", "wingdi"
+]}
+# crossbeam-channel = "0.5" # 暂时不添加，除非我们需要完整的事件队列
