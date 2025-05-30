@@ -1,24 +1,29 @@
-use eframe::{run_native, App, CreationContext, NativeOptions};
+use eframe::{run_native, App, CreationContext};
 use egui::{Context, FontData, FontDefinitions, FontFamily, ScrollArea};
 use egui_graphs::{Graph, GraphView, DefaultNodeShape, DefaultEdgeShape, SettingsStyle, SettingsNavigation, SettingsInteraction, events::Event};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc; // Ensure Arc is imported
 use petgraph::stable_graph::{StableGraph, DefaultIx, NodeIndex};
-use petgraph::Directed;
+use petgraph::{Directed, Undirected, EdgeType}; // Added Undirected and EdgeType
 use rand::{Rng, rngs::ThreadRng}; // Per user suggestion
-use fdg::{ForceGraph, Force, init_force_graph_uniform}; // Per user suggestion
-use fdg::fruchterman_reingold::{FruchtermanReingold, FruchtermanReingoldConfiguration};
+use fdg::{ForceGraph, Force}; // Per user suggestion
+use fdg::fruchterman_reingold::FruchtermanReingold;
 // use fdg::nalgebra as na; // Removed as nalgebra types are accessed via fdg::nalgebra or not directly needed
-use rustc_hash::FxHasher;
-use std::hash::BuildHasherDefault;
 use crossbeam_channel::{unbounded, Sender, Receiver};
 
 const DEFAULT_NODE_COUNT: usize = 15;
 const DEFAULT_EDGE_COUNT: usize = 20;
 
+// Enum to hold either a directed or an undirected graph
+pub enum AppGraph {
+    Directed(Graph<String, String, Directed>),
+    Undirected(Graph<String, String, Undirected>),
+}
+
 pub struct BasicApp {
-    g: Graph<String, String>,
+    g: AppGraph,
+    is_directed: bool, // To track current graph type
     style_labels_always: bool,
     nav_fit_to_screen: bool,
     nav_zoom_and_pan: bool,
@@ -44,6 +49,7 @@ pub struct BasicApp {
     rng: ThreadRng,
     event_publisher: Sender<Event>,
     event_consumer: Receiver<Event>,
+    node_label_to_index_map: HashMap<String, NodeIndex<DefaultIx>>,
 }
 
 impl BasicApp {
@@ -66,10 +72,15 @@ impl BasicApp {
         cc.egui_ctx.set_fonts(fonts);
 
         let (event_publisher, event_consumer) = unbounded();
-        let mut rng: ThreadRng = rand::thread_rng(); // Per user suggestion
+        let rng = rand::rngs::ThreadRng::default(); // Per user suggestion, updated to new API
+        
+        let initial_is_directed = true;
+        let initial_petgraph = StableGraph::<String, String, Directed>::new(); // Placeholder, will be properly initialized in reset
+        let initial_egui_graph = Graph::<String, String, Directed>::from(&initial_petgraph);
 
         let mut app = Self {
-            g: Graph::new(StableGraph::new()), 
+            g: AppGraph::Directed(initial_egui_graph), // Initialized properly in reset_graph_and_simulation
+            is_directed: initial_is_directed,
             style_labels_always: true,
             nav_fit_to_screen: true,
             nav_zoom_and_pan: false,
@@ -94,9 +105,10 @@ impl BasicApp {
             simulation_stopped: false,
             graph_nodes_count: DEFAULT_NODE_COUNT,
             graph_edges_count: DEFAULT_EDGE_COUNT,
-            rng, 
+            rng,
             event_publisher,
             event_consumer,
+            node_label_to_index_map: HashMap::new(),
         };
 
         app.reset_graph_and_simulation();
@@ -105,12 +117,45 @@ impl BasicApp {
     }
 
     fn reset_graph_and_simulation(&mut self) {
-        let (g_petgraph, egui_graph_initialized) = 
-            Self::generate_petgraph_and_egui_graph(self.graph_nodes_count, self.graph_edges_count, &mut self.rng);
+        self.node_label_to_index_map.clear(); // Clear map before repopulating
+        let petgraph_graph_for_fdg: StableGraph<String, String, Directed>;
+
+        if self.is_directed {
+            let mut pet_graph_directed = StableGraph::<String, String, Directed>::new();
+            Self::populate_graph_data(&mut pet_graph_directed, self.graph_nodes_count, self.graph_edges_count, &mut self.rng, &mut self.node_label_to_index_map);
+            
+            let mut egui_graph = Graph::<String, String, Directed>::from(&pet_graph_directed);
+            Self::initialize_egui_node_positions(&mut egui_graph, &pet_graph_directed, &mut self.rng);
+
+            self.g = AppGraph::Directed(egui_graph);
+            petgraph_graph_for_fdg = pet_graph_directed; // fdg always gets a Directed graph
+        } else {
+            let mut pet_graph_undirected = StableGraph::<String, String, Undirected>::default();
+            Self::populate_graph_data(&mut pet_graph_undirected, self.graph_nodes_count, self.graph_edges_count, &mut self.rng, &mut self.node_label_to_index_map);
+
+            let mut egui_graph = Graph::<String, String, Undirected>::from(&pet_graph_undirected);
+            Self::initialize_egui_node_positions(&mut egui_graph, &pet_graph_undirected, &mut self.rng);
+            self.g = AppGraph::Undirected(egui_graph);
+
+            // Create a directed version for fdg
+            let mut directed_temp_graph = StableGraph::<String, String, Directed>::new();
+            for node_idx in pet_graph_undirected.node_indices() {
+                if let Some(weight) = pet_graph_undirected.node_weight(node_idx) {
+                    directed_temp_graph.add_node(weight.clone());
+                }
+            }
+            for edge_idx in pet_graph_undirected.edge_indices() {
+                if let (Some(source), Some(target)) = (pet_graph_undirected.edge_endpoints(edge_idx).map(|(s, _)| s), pet_graph_undirected.edge_endpoints(edge_idx).map(|(_, t)| t)) {
+                    if let Some(weight) = pet_graph_undirected.edge_weight(edge_idx) {
+                        directed_temp_graph.add_edge(source, target, weight.clone());
+                    }
+                }
+            }
+            petgraph_graph_for_fdg = directed_temp_graph;
+        }
         
-        self.g = egui_graph_initialized;
-        // Use fdg::init_force_graph_uniform with g_petgraph.clone()
-        self.sim = fdg::init_force_graph_uniform(g_petgraph.clone(), 100.0);
+        self.sim = fdg::init_force_graph_uniform(petgraph_graph_for_fdg, 100.0);
+
         self.force_algo = fdg::fruchterman_reingold::FruchtermanReingold { // Per user suggestion
             conf: fdg::fruchterman_reingold::FruchtermanReingoldConfiguration {
                 dt: self.sim_dt,
@@ -120,65 +165,124 @@ impl BasicApp {
             velocities: HashMap::default(), // Per user suggestion
         };
         
-        for _ in 0..100 { Force::apply(&mut self.force_algo, &mut self.sim); } 
-        Self::sync_node_positions(&mut self.g, &self.sim);
+        for _ in 0..100 { Force::apply(&mut self.force_algo, &mut self.sim); }
+        Self::sync_node_positions_to_egui(&self.sim, &mut self.g, &self.node_label_to_index_map);
     }
 
-    fn generate_petgraph_and_egui_graph(
+    // Helper to populate petgraph data
+    fn populate_graph_data<Ty: EdgeType>(
+        graph_data: &mut StableGraph<String, String, Ty>,
         node_count: usize,
         edge_count: usize,
-        rng: &mut ThreadRng, 
-    ) -> (StableGraph<String, String>, Graph<String, String>) {
-        let mut graph_data = StableGraph::new();
-
+        rng: &mut ThreadRng,
+        node_label_to_index_map: &mut HashMap<String, NodeIndex<DefaultIx>>,
+    ) {
         for i in 0..node_count {
             let label = format!("节点{}", i);
-            graph_data.add_node(label);
+            let node_idx = graph_data.add_node(label.clone());
+            node_label_to_index_map.insert(label, node_idx);
         }
 
         if node_count > 0 {
             for _ in 0..edge_count {
-                let source_idx = rng.gen_range(0..node_count); 
-                let target_idx = rng.gen_range(0..node_count);
+                let source_idx = rng.random_range(0..node_count);
+                let target_idx = rng.random_range(0..node_count);
                 if source_idx != target_idx {
-                    let label = format!("边 {}-{}", source_idx, target_idx);
-                    graph_data.add_edge(NodeIndex::new(source_idx), NodeIndex::new(target_idx), label);
+                    // Ensure NodeIndex are valid for the current graph_data
+                    let source_node_index = NodeIndex::new(source_idx);
+                    let target_node_index = NodeIndex::new(target_idx);
+                    
+                    // Check if nodes exist before adding edge (optional, but good practice)
+                    if graph_data.node_weight(source_node_index).is_some() && graph_data.node_weight(target_node_index).is_some() {
+                        let label = format!("边 {}-{}", source_idx, target_idx);
+                        graph_data.add_edge(source_node_index, target_node_index, label);
+                    }
                 }
             }
         }
-        
-        let mut egui_graph = Graph::<String, String, Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::from(&graph_data);
+    }
 
-        for node_idx in graph_data.node_indices() {
-            if let Some(payload_str) = graph_data.node_weight(node_idx) {
-                if let Some(egui_node) = egui_graph.node_mut(node_idx) {
+    // Helper to initialize egui_graphs node positions and labels from petgraph
+    fn initialize_egui_node_positions<Ty: EdgeType>(
+        egui_graph: &mut Graph<String, String, Ty>,
+        petgraph_graph: &StableGraph<String, String, Ty>,
+        rng: &mut ThreadRng,
+    ) {
+        for node_idx_pet in petgraph_graph.node_indices() {
+            // Get the corresponding egui_graphs NodeIndex.
+            // For StableGraph, NodeIndex is stable, so direct mapping should work if Graph::from preserves indices.
+            // Let's assume egui_graph's indices match petgraph_graph after Graph::from.
+            let egui_node_idx = node_idx_pet; // This is an assumption. egui_graphs might re-index.
+                                            // A safer way would be to iterate egui_graph.nodes_iter_mut() if possible,
+                                            // or build a map if egui_graphs doesn't guarantee index preservation from petgraph::Graph
+                                            // For now, let's proceed with the assumption that indices are consistent.
+
+            if let Some(payload_str) = petgraph_graph.node_weight(node_idx_pet) {
+                if let Some(egui_node) = egui_graph.node_mut(egui_node_idx) {
                     egui_node.set_label(payload_str.clone());
-                    let x = rng.gen_range(-200.0..200.0);
-                    let y = rng.gen_range(-200.0..200.0);
+                    let x = rng.random_range(-200.0..200.0);
+                    let y = rng.random_range(-200.0..200.0);
                     egui_node.set_location(eframe::egui::Pos2::new(x,y));
                 }
             }
         }
-        for edge_idx in graph_data.edge_indices() {
-            if let Some(payload_str) = graph_data.edge_weight(edge_idx) {
-                if let Some(egui_edge) = egui_graph.edge_mut(edge_idx) {
+        for edge_idx_pet in petgraph_graph.edge_indices() {
+            let egui_edge_idx = edge_idx_pet; // Similar assumption for edge indices
+            if let Some(payload_str) = petgraph_graph.edge_weight(edge_idx_pet) {
+                if let Some(egui_edge) = egui_graph.edge_mut(egui_edge_idx) {
                     egui_edge.set_label(payload_str.clone());
                 }
             }
         }
-        (graph_data, egui_graph)
     }
 
-    fn sync_node_positions(egui_g: &mut Graph<String, String>, sim_g: &fdg::ForceGraph<f32, 2, String, String>) {
-        let indices: Vec<_> = egui_g.g.node_indices().collect(); 
-        for idx in indices {
-            if let Some(node_widget) = egui_g.node_mut(idx) {
-                 if let Some((_data, sim_node_pos_point)) = sim_g.node_weight(idx) {
-                    node_widget.set_location(eframe::egui::Pos2::new(sim_node_pos_point.x, sim_node_pos_point.y));
+    // Renamed and signature changed to accept AppGraph
+    fn sync_node_positions_to_egui(
+        sim_g: &fdg::ForceGraph<f32, 2, String, String>,
+        app_g: &mut AppGraph,
+        node_label_to_index_map: &HashMap<String, NodeIndex<DefaultIx>> // Pass map here as well
+    ) {
+        match app_g {
+            AppGraph::Directed(g_directed) => {
+                Self::sync_specific_graph(sim_g, g_directed, node_label_to_index_map);
+            }
+            AppGraph::Undirected(g_undirected) => {
+                Self::sync_specific_graph(sim_g, g_undirected, node_label_to_index_map);
+            }
+        }
+    }
+    
+    // Helper for sync_node_positions_to_egui
+    fn sync_specific_graph<Ty: EdgeType>(
+        sim_g: &fdg::ForceGraph<f32, 2, String, String>,
+        egui_g_specific: &mut Graph<String, String, Ty>,
+        node_label_to_index_map: &HashMap<String, NodeIndex<DefaultIx>> // Added map parameter
+    ) {
+        // Assuming sim_g.node_weights() for this fdg version returns (String, fdg::nalgebra::OPoint)
+        // where String is the node label (N) and OPoint is the position.
+        for (node_label_from_sim, sim_pos_point) in sim_g.node_weights() {
+            // node_label_from_sim: String
+            // sim_pos_point: fdg::nalgebra::OPoint<f32, fdg::nalgebra::Const<2>>
+            
+            if let Some(&node_idx_for_egui) = node_label_to_index_map.get(node_label_from_sim.as_str()) {
+                if let Some(node_widget_in_egui) = egui_g_specific.node_mut(node_idx_for_egui) {
+                    node_widget_in_egui.set_location(eframe::egui::Pos2::new(sim_pos_point.coords.x, sim_pos_point.coords.y));
                 }
             }
         }
     }
+    
+    // Original sync_node_positions logic, to be removed or adapted if the above works
+    // fn sync_node_positions(egui_g: &mut Graph<String, String>, sim_g: &fdg::ForceGraph<f32, 2, String, String>) {
+    //     let indices: Vec<_> = egui_g.g.node_indices().collect();
+    //     for idx in indices {
+    //         if let Some(node_widget) = egui_g.node_mut(idx) {
+    //              if let Some((_data, sim_node_pos_point)) = sim_g.node_weight(idx) {
+    //                 node_widget.set_location(eframe::egui::Pos2::new(sim_node_pos_point.x, sim_node_pos_point.y));
+    //             } // End of inner if, part of commented old function
+    //         } // End of outer if, part of commented old function
+    //     } // End of for loop, part of commented old function
+    // } // End of commented old function
 
     fn update_simulation(&mut self) {
         if !self.simulation_stopped {
@@ -212,6 +316,13 @@ impl App for BasicApp {
                 ui.separator();
                 
                 ScrollArea::vertical().show(ui, |ui| {
+                    ui.collapsing("图属性", |ui| {
+                        if ui.checkbox(&mut self.is_directed, "有向图").changed() {
+                            self.reset_graph_and_simulation();
+                        }
+                    });
+                    ui.separator();
+
                     ui.collapsing("样式设置", |ui| {
                         ui.checkbox(&mut self.style_labels_always, "总是显示标签");
                     });
@@ -329,21 +440,35 @@ impl App for BasicApp {
                 .with_edge_clicking_enabled(self.ia_edge_clicking_enabled)
                 .with_edge_selection_enabled(self.ia_edge_selection_enabled)
                 .with_edge_selection_multi_enabled(self.ia_edge_selection_multi_enabled);
-            
-            let mut graph_view =
-                GraphView::<String, String, Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::new(
-                    &mut self.g,
-                )
-                .with_styles(&style_settings)
-                .with_navigations(&nav_settings)
-                .with_interactions(&interaction_settings)
-                .with_events(&self.event_publisher); 
-            ui.add(&mut graph_view);
+
+            match &mut self.g {
+                AppGraph::Directed(g_directed) => {
+                    let mut graph_view =
+                        GraphView::<String, String, Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::new(g_directed)
+                            .with_styles(&style_settings)
+                            .with_navigations(&nav_settings)
+                            .with_interactions(&interaction_settings)
+                            .with_events(&self.event_publisher);
+                    ui.add(&mut graph_view);
+                }
+                AppGraph::Undirected(g_undirected) => {
+                    let mut graph_view =
+                        GraphView::<String, String, Undirected, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::new(g_undirected)
+                            .with_styles(&style_settings)
+                            .with_navigations(&nav_settings)
+                            .with_interactions(&interaction_settings)
+                            .with_events(&self.event_publisher);
+                    ui.add(&mut graph_view);
+                }
+            }
         });
 
-        self.handle_events(); 
+        self.handle_events();
         self.update_simulation();
-        Self::sync_node_positions(&mut self.g, &self.sim);
+        // The sync_node_positions_to_egui call was already updated in a previous step.
+        // Original line before that was: Self::sync_node_positions(&mut self.g, &self.sim);
+        // Current correct line (already in file from previous diff):
+        Self::sync_node_positions_to_egui(&self.sim, &mut self.g, &self.node_label_to_index_map);
     }
 }
 
