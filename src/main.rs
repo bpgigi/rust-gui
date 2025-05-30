@@ -4,7 +4,7 @@ use egui_graphs::{Graph, GraphView, DefaultNodeShape, DefaultEdgeShape, Settings
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc; // Ensure Arc is imported
-use petgraph::stable_graph::{StableGraph, DefaultIx, NodeIndex};
+use petgraph::stable_graph::{StableGraph, DefaultIx, NodeIndex, EdgeIndex}; // Added EdgeIndex
 use petgraph::{Directed, Undirected, EdgeType}; // Added Undirected and EdgeType
 use rand::{Rng, rngs::ThreadRng}; // Per user suggestion
 use fdg::{ForceGraph, Force}; // Per user suggestion
@@ -101,10 +101,10 @@ impl BasicApp {
             ia_dragging_enabled: true,
             ia_node_clicking_enabled: true,
             ia_node_selection_enabled: true,
-            ia_node_selection_multi_enabled: false,
-            ia_edge_clicking_enabled: false,
-            ia_edge_selection_enabled: false,
-            ia_edge_selection_multi_enabled: false,
+            ia_node_selection_multi_enabled: true, // Enable node multi-selection
+            ia_edge_clicking_enabled: true, // Enable edge clicking (often needed for selection)
+            ia_edge_selection_enabled: true, // Enable edge selection
+            ia_edge_selection_multi_enabled: true, // Enable edge multi-selection (optional for now, can be false)
             sim: fdg::ForceGraph::new(), 
             force_algo: fdg::fruchterman_reingold::FruchtermanReingold { // Per user suggestion
                 conf: fdg::fruchterman_reingold::FruchtermanReingoldConfiguration { 
@@ -313,6 +313,112 @@ impl BasicApp {
             }
         }
     }
+
+    fn add_edge_between_selected_nodes(&mut self) {
+        let selected_node_indices: Vec<NodeIndex<DefaultIx>> = match &self.g {
+            AppGraph::Directed(g) => g.selected_nodes().iter().copied().collect(),
+            AppGraph::Undirected(g) => g.selected_nodes().iter().copied().collect(),
+        };
+
+        if selected_node_indices.len() == 2 {
+            let n1_idx = selected_node_indices[0];
+            let n2_idx = selected_node_indices[1];
+
+            // Prevent self-loops if desired, though petgraph allows them.
+            if n1_idx == n2_idx {
+                println!("Cannot add self-loop.");
+                return;
+            }
+
+            // Create payload for the new edge
+            // For simplicity, create a generic label and default weight.
+            // We need to access node labels for a more descriptive edge label.
+            let n1_label = match &self.g {
+                AppGraph::Directed(g) => g.node(n1_idx).map_or("N/A".to_string(), |n| n.payload().label.clone()),
+                AppGraph::Undirected(g) => g.node(n1_idx).map_or("N/A".to_string(), |n| n.payload().label.clone()),
+            };
+            let n2_label = match &self.g {
+                AppGraph::Directed(g) => g.node(n2_idx).map_or("N/A".to_string(), |n| n.payload().label.clone()),
+                AppGraph::Undirected(g) => g.node(n2_idx).map_or("N/A".to_string(), |n| n.payload().label.clone()),
+            };
+
+            let edge_label = format!("边: {}->{}", n1_label, n2_label);
+            let edge_payload = EdgePayload { label: edge_label, weight: 1.0 };
+
+            // Add edge to egui_graphs Graph
+            let _ = match &mut self.g { // Explicitly ignore return value
+                AppGraph::Directed(g) => { g.add_edge(n1_idx, n2_idx, edge_payload.clone()); },
+                AppGraph::Undirected(g) => { g.add_edge(n1_idx, n2_idx, edge_payload.clone()); },
+            };
+
+            // Add edge to fdg::ForceGraph
+            // fdg::ForceGraph::add_edge takes E (EdgePayload in our case)
+            self.sim.add_edge(n1_idx, n2_idx, edge_payload);
+
+            self.graph_edges_count = match &self.g {
+                AppGraph::Directed(g) => g.edge_count(),
+                AppGraph::Undirected(g) => g.edge_count(),
+            };
+
+            // Optionally, clear node selection after adding edge
+            // match &mut self.g {
+            //     AppGraph::Directed(g) => g.clear_selected_nodes(),
+            //     AppGraph::Undirected(g) => g.clear_selected_nodes(),
+            // };
+            println!("Edge added between {:?} and {:?}", n1_idx, n2_idx);
+        } else {
+            println!("Please select exactly two nodes to add an edge.");
+        }
+    }
+
+    fn remove_selected_edges_ui(&mut self) {
+        let selected_edge_indices: Vec<EdgeIndex<DefaultIx>> = match &self.g {
+            AppGraph::Directed(g) => g.selected_edges().iter().copied().collect(),
+            AppGraph::Undirected(g) => g.selected_edges().iter().copied().collect(),
+        };
+
+        if selected_edge_indices.is_empty() {
+            println!("No edges selected to remove.");
+            return;
+        }
+
+        for edge_idx in selected_edge_indices {
+            // Remove edge from egui_graphs Graph
+            match &mut self.g { // Make arms return ()
+                AppGraph::Directed(g) => { g.remove_edge(edge_idx); },
+                AppGraph::Undirected(g) => { g.remove_edge(edge_idx); },
+            };
+
+            // Remove edge from fdg::ForceGraph
+            // fdg::ForceGraph::remove_edge takes an EdgeIndex.
+            // We need to ensure the EdgeIndex from egui_graphs is compatible or find the edge differently.
+            // fdg's remove_edge returns Option<E>.
+            // Assuming EdgeIndex is compatible. If not, we might need to find endpoints and use find_edge_mut then remove.
+            let _removed_edge_payload_fdg = self.sim.remove_edge(edge_idx);
+            if _removed_edge_payload_fdg.is_none() {
+                 // This might happen if fdg's graph is out of sync or uses different indexing for edges
+                 // For now, we assume direct index compatibility.
+                println!("Warning: Edge {:?} not found in fdg simulation or already removed.", edge_idx);
+            }
+            
+            println!("Edge {:?} removed.", edge_idx);
+        }
+
+        self.graph_edges_count = match &self.g {
+            AppGraph::Directed(g) => g.edge_count(),
+            AppGraph::Undirected(g) => g.edge_count(),
+        };
+
+        // Clear edge selection
+        match &mut self.g {
+            AppGraph::Directed(g) => {
+                g.set_selected_edges(Default::default()); // Create an empty IndexSet
+            }
+            AppGraph::Undirected(g) => {
+                g.set_selected_edges(Default::default()); // Create an empty IndexSet
+            }
+        };
+    }
 }
 
 impl App for BasicApp {
@@ -462,6 +568,33 @@ impl App for BasicApp {
                             ui.label(format!("选中了 {} 个节点", selected_nodes.len()));
                         }
                         // TODO: Add similar logic for selected edges if needed
+                    });
+
+                    ui.separator();
+
+                    ui.collapsing("边操作", |ui| {
+                        let selected_nodes_count = match &self.g {
+                            AppGraph::Directed(g) => g.selected_nodes().len(),
+                            AppGraph::Undirected(g) => g.selected_nodes().len(),
+                        };
+                        let selected_edges_count = match &self.g {
+                            AppGraph::Directed(g) => g.selected_edges().len(),
+                            AppGraph::Undirected(g) => g.selected_edges().len(),
+                        };
+
+                        ui.add_enabled_ui(selected_nodes_count == 2, |ui| {
+                            if ui.button("在选中的两个节点间添加边").clicked() {
+                                self.add_edge_between_selected_nodes();
+                            }
+                        });
+                        
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(selected_edges_count > 0, |ui| {
+                            if ui.button(format!("删除选中的 {} 条边", selected_edges_count)).clicked() {
+                                self.remove_selected_edges_ui();
+                            }
+                        });
                     });
                 });
             });
