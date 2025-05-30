@@ -7,6 +7,7 @@ use petgraph::Directed;
 
 pub struct BasicApp {
     g: Graph<String, ()>,
+    style_labels_always: bool, // 新增：用于存储标签显示设置
 }
 
 impl BasicApp {
@@ -63,7 +64,10 @@ impl BasicApp {
             }
         }
 
-        Self { g: egui_graph }
+        Self {
+            g: egui_graph,
+            style_labels_always: true, // 初始化设置
+        }
     }
 }
 
@@ -74,12 +78,16 @@ impl App for BasicApp {
             .show(ctx, |ui| {
                 ui.heading("配置面板");
                 ui.separator();
-                ui.label("此处将放置配置选项。");
+                
+                ui.collapsing("样式设置", |ui| {
+                    ui.checkbox(&mut self.style_labels_always, "总是显示标签");
+                });
                 // 以后我们会在这里添加具体的UI控件
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let style_settings = SettingsStyle::new().with_labels_always(true);
+            // 使用 self.style_labels_always 来动态配置
+            let style_settings = SettingsStyle::new().with_labels_always(self.style_labels_always);
             let mut graph_view =
                 GraphView::<String, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::new(
                     &mut self.g,
