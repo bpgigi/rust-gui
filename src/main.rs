@@ -1,6 +1,7 @@
 use eframe::{run_native, App, CreationContext, NativeOptions};
-use egui::Context;
+use egui::{Context, FontData, FontDefinitions, FontFamily}; // Added Font types
 use egui_graphs::{Graph, GraphView, DefaultNodeShape, DefaultEdgeShape, SettingsStyle};
+use std::fs; // For reading the font file
 use petgraph::stable_graph::{StableGraph, DefaultIx};
 use petgraph::Directed;
 
@@ -9,7 +10,47 @@ pub struct BasicApp {
 }
 
 impl BasicApp {
-    fn new(_: &CreationContext<'_>) -> Self {
+    fn new(cc: &CreationContext<'_>) -> Self { // Added cc parameter to access egui_ctx
+        // --- FONT SETUP START ---
+        let mut fonts = FontDefinitions::default();
+
+        // Attempt to load "微软雅黑" from an "assets" folder
+        // Attempt to load "simsun.ttc" directly from Windows system font directory.
+        // Note: This approach is not portable to other operating systems.
+        let font_path = "C:\\Windows\\Fonts\\simsun.ttc";
+        match fs::read(font_path) {
+            Ok(font_bytes) => {
+                fonts.font_data.insert(
+                    "my_chinese_font".to_owned(), // Give it a name
+                    FontData::from_owned(font_bytes).into(), // Convert to Arc<FontData>
+                );
+
+                // Prioritize our new font for proportional (standard) text
+                fonts.families
+                    .entry(FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "my_chinese_font".to_owned());
+
+                // Optionally, also for monospace text
+                fonts.families
+                    .entry(FontFamily::Monospace)
+                    .or_default()
+                    .insert(0, "my_chinese_font".to_owned());
+                
+                println!("Successfully loaded font: {}", font_path);
+            }
+            Err(e) => {
+                eprintln!("Error loading font file at '{}': {}. Chinese characters might not display correctly.", font_path, e);
+                // Fallback: you could try to add system font names here if you know them and egui supports it,
+                // but loading from file is more reliable.
+                // For example, on some systems, egui might find "Microsoft YaHei" if installed.
+                // fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Microsoft YaHei".to_owned());
+            }
+        }
+        
+        cc.egui_ctx.set_fonts(fonts);
+        // --- FONT SETUP END ---
+
         let graph_data = generate_graph();
         Self {
             g: Graph::from(&graph_data),
@@ -19,6 +60,15 @@ impl BasicApp {
 
 impl App for BasicApp {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
+        egui::SidePanel::right("config_panel")
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("配置面板");
+                ui.separator();
+                ui.label("此处将放置配置选项。");
+                // 以后我们会在这里添加具体的UI控件
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let style_settings = SettingsStyle::new().with_labels_always(true);
             let mut graph_view =
