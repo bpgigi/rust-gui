@@ -1,0 +1,12 @@
+[package]
+name = "egui_basic_standalone"
+version = "0.1.0"
+authors = ["Dmitrii Samsonov <blitzarx1@gmail.com>"] # 保留原始作者信息
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+egui_graphs = "0.26.0" # 使用 crates.io 版本
+egui = "0.31"
+eframe = "0.31"
+petgraph = "0.8"
