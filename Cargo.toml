@@ -6,7 +6,7 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
-egui_graphs = "0.26.0" # 使用 crates.io 版本
+egui_graphs = "0.25.1" # 更改为 crates.io 上可用的版本
 egui = "0.31"
 eframe = "0.31"
 petgraph = "0.8"
