@@ -431,6 +431,38 @@ impl App for BasicApp {
                            self.reset_graph_and_simulation();
                         }
                     });
+
+                    ui.separator();
+
+                    ui.collapsing("选中项详情", |ui| {
+                        let selected_nodes: Vec<_> = match &self.g {
+                            AppGraph::Directed(g) => g.selected_nodes().iter().copied().collect(),
+                            AppGraph::Undirected(g) => g.selected_nodes().iter().copied().collect(),
+                        };
+
+                        if selected_nodes.len() == 1 {
+                            let node_id = selected_nodes[0];
+                            match &self.g {
+                                AppGraph::Directed(g) => {
+                                    if let Some(node) = g.node(node_id) {
+                                        ui.label(format!("节点标签: {}", node.payload().label));
+                                        ui.label(format!("节点权重: {:.2}", node.payload().weight));
+                                    }
+                                }
+                                AppGraph::Undirected(g) => {
+                                    if let Some(node) = g.node(node_id) {
+                                        ui.label(format!("节点标签: {}", node.payload().label));
+                                        ui.label(format!("节点权重: {:.2}", node.payload().weight));
+                                    }
+                                }
+                            }
+                        } else if selected_nodes.is_empty() {
+                            ui.label("未选中任何节点");
+                        } else {
+                            ui.label(format!("选中了 {} 个节点", selected_nodes.len()));
+                        }
+                        // TODO: Add similar logic for selected edges if needed
+                    });
                 });
             });
 
