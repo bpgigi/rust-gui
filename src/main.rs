@@ -51,10 +51,19 @@ impl BasicApp {
         cc.egui_ctx.set_fonts(fonts);
         // --- FONT SETUP END ---
 
-        let graph_data = generate_graph();
-        Self {
-            g: Graph::from(&graph_data),
+        let graph_data = generate_graph(); // This is petgraph::StableGraph<String, ()>
+        let mut egui_graph = Graph::<String, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>::from(&graph_data);
+
+        // Iterate over the nodes and set their labels explicitly from the payload
+        for node_idx in graph_data.node_indices() {
+            if let Some(payload_str) = graph_data.node_weight(node_idx) {
+                if let Some(egui_node) = egui_graph.node_mut(node_idx) {
+                    egui_node.set_label(payload_str.clone());
+                }
+            }
         }
+
+        Self { g: egui_graph }
     }
 }
 
