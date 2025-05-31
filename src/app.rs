@@ -336,12 +336,54 @@ impl BasicApp {
             },
             velocities: HashMap::default(), // Reset velocities
         };
-        for _ in 0..50 { Force::apply(&mut self.force_algo, &mut self.sim); } // Shorter simulation run
+        // DO NOT run simulation immediately after conversion to keep positions stable.
+        // Instead, sync the (preserved) egui positions TO the new fdg simulation.
+        // The old egui positions were already applied to the new self.g.
+        // Now, update self.sim to match self.g positions.
 
-        // Sync egui graph node positions from the new fdg simulation state
-        // This is crucial because egui graph has old screen positions, fdg has new simulation positions.
-        // We want egui graph to reflect the new simulation state while keeping the general layout.
-        Self::sync_node_positions_to_egui(&self.sim, &mut self.g, &self.node_label_to_index_map);
+        self.sync_egui_positions_to_fdg();
+        
+        // Optional: if simulation was running, maybe stop it or reset forces,
+        // as the graph structure changed. For now, just ensure positions are synced.
+        // The regular update loop will handle ongoing simulation if not stopped.
+    }
+
+    // New method to sync positions from egui_graphs to fdg_simulation
+    fn sync_egui_positions_to_fdg(&mut self) {
+        match &self.g {
+            AppGraph::Directed(g_directed) => {
+                for node_idx_egui in g_directed.g.node_indices() {
+                    if let Some(egui_node) = g_directed.node(node_idx_egui) {
+                        let egui_pos = egui_node.location();
+                        // Find the corresponding node in self.sim and update its Point
+                        // This assumes self.node_label_to_index_map maps label to egui_node_idx (which is also petgraph idx for egui_graph)
+                        // And fdg graph's nodes can be identified by this same NodeIndex if structure was preserved,
+                        // or by payload label if fdg's indices are different.
+                        // Since fdg::init_force_graph_uniform rebuilds fdg's graph, its internal NodeIndices might be new.
+                        // We stored old_idx_to_new_idx_map during convert_graph_direction, which maps old egui_graph NodeIndex
+                        // to the new petgraph NodeIndex used to build the current egui_graph and new_petgraph_for_fdg.
+                        // So, node_idx_egui IS the index used in new_petgraph_for_fdg.
+                        if let Some((_payload_in_sim, point_in_sim)) = self.sim.node_weight_mut(node_idx_egui) {
+                            point_in_sim.coords.x = egui_pos.x;
+                            point_in_sim.coords.y = egui_pos.y;
+                        }
+                    }
+                }
+            }
+            AppGraph::Undirected(g_undirected) => {
+                for node_idx_egui in g_undirected.g.node_indices() {
+                    if let Some(egui_node) = g_undirected.node(node_idx_egui) {
+                        let egui_pos = egui_node.location();
+                        if let Some((_payload_in_sim, point_in_sim)) = self.sim.node_weight_mut(node_idx_egui) {
+                            point_in_sim.coords.x = egui_pos.x;
+                            point_in_sim.coords.y = egui_pos.y;
+                        }
+                    }
+                }
+            }
+        }
+        // After syncing positions to fdg, also clear velocities in fdg to prevent immediate movement if simulation is on.
+        self.force_algo.velocities.clear();
     }
 
     fn populate_graph_data<Ty: EdgeType>(
