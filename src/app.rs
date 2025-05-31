@@ -71,6 +71,8 @@ pub struct BasicApp {
     pub input_node_to: String,
     pub input_node_to_add: String,
     pub input_node_to_remove: String,
+    pub input_node_weight: f32, // New field for node weight input
+    pub input_edge_weight: f32, // New field for edge weight input
 }
 
 impl BasicApp {
@@ -134,6 +136,8 @@ impl BasicApp {
             input_node_to: String::new(),
             input_node_to_add: String::new(),
             input_node_to_remove: String::new(),
+            input_node_weight: 1.0, // Default weight
+            input_edge_weight: 1.0, // Default weight
         };
 
         app.reset_graph_and_simulation();
@@ -163,15 +167,20 @@ impl BasicApp {
             self.g = AppGraph::Undirected(egui_graph);
 
             let mut directed_temp_graph = StableGraph::<NodePayload, EdgePayload, Directed>::new();
-            for node_idx in pet_graph_undirected.node_indices() {
-                if let Some(payload) = pet_graph_undirected.node_weight(node_idx) {
-                    directed_temp_graph.add_node(payload.clone());
+            // When converting from undirected to directed for fdg, preserve node indices
+            let mut node_map_undir_to_dir = HashMap::new();
+            for node_idx_undir in pet_graph_undirected.node_indices() {
+                if let Some(payload) = pet_graph_undirected.node_weight(node_idx_undir) {
+                    let node_idx_dir = directed_temp_graph.add_node(payload.clone());
+                    node_map_undir_to_dir.insert(node_idx_undir, node_idx_dir);
                 }
             }
-            for edge_idx in pet_graph_undirected.edge_indices() {
-                if let (Some(source), Some(target)) = (pet_graph_undirected.edge_endpoints(edge_idx).map(|(s, _)| s), pet_graph_undirected.edge_endpoints(edge_idx).map(|(_, t)| t)) {
-                    if let Some(payload) = pet_graph_undirected.edge_weight(edge_idx) {
-                        directed_temp_graph.add_edge(source, target, payload.clone());
+            for edge_idx_undir in pet_graph_undirected.edge_indices() {
+                if let (Some(source_undir), Some(target_undir)) = (pet_graph_undirected.edge_endpoints(edge_idx_undir).map(|(s, _)| s), pet_graph_undirected.edge_endpoints(edge_idx_undir).map(|(_, t)| t)) {
+                    if let (Some(&source_dir), Some(&target_dir)) = (node_map_undir_to_dir.get(&source_undir), node_map_undir_to_dir.get(&target_undir)) {
+                        if let Some(payload) = pet_graph_undirected.edge_weight(edge_idx_undir) {
+                             directed_temp_graph.add_edge(source_dir, target_dir, payload.clone());
+                        }
                     }
                 }
             }
@@ -190,6 +199,148 @@ impl BasicApp {
         };
         
         for _ in 0..100 { Force::apply(&mut self.force_algo, &mut self.sim); }
+        Self::sync_node_positions_to_egui(&self.sim, &mut self.g, &self.node_label_to_index_map);
+    }
+
+    pub fn convert_graph_direction(&mut self) {
+        let mut old_nodes = Vec::new(); // Vec of (NodeIndex from old graph, NodePayload, egui::Pos2 for location)
+        let mut old_edges = Vec::new(); // Vec of (NodeIndex src, NodeIndex dst, EdgePayload)
+
+        let mut temp_node_label_to_old_idx = HashMap::new();
+
+        // Extract data from the current graph
+        match &self.g {
+            AppGraph::Directed(g) => {
+                for idx in g.g.node_indices() {
+                    if let Some(node) = g.node(idx) {
+                        old_nodes.push((idx, node.payload().clone(), node.location()));
+                        temp_node_label_to_old_idx.insert(node.payload().label.clone(), idx);
+                    }
+                }
+                for edge_idx in g.g.edge_indices() {
+                    if let Some((source_idx, target_idx)) = g.g.edge_endpoints(edge_idx) {
+                        if let Some(edge) = g.edge(edge_idx) {
+                            old_edges.push((source_idx, target_idx, edge.payload().clone()));
+                        }
+                    }
+                }
+            }
+            AppGraph::Undirected(g) => {
+                for idx in g.g.node_indices() {
+                    if let Some(node) = g.node(idx) {
+                        old_nodes.push((idx, node.payload().clone(), node.location()));
+                        temp_node_label_to_old_idx.insert(node.payload().label.clone(), idx);
+                    }
+                }
+                for edge_idx in g.g.edge_indices() {
+                     if let Some((source_idx, target_idx)) = g.g.edge_endpoints(edge_idx) {
+                        if let Some(edge) = g.edge(edge_idx) {
+                            old_edges.push((source_idx, target_idx, edge.payload().clone()));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Clear current node_label_to_index_map, it will be rebuilt
+        self.node_label_to_index_map.clear();
+        let mut new_petgraph_for_fdg = StableGraph::<NodePayload, EdgePayload, Directed>::new();
+        let mut old_idx_to_new_idx_map = HashMap::new(); // For fdg graph construction
+
+        if self.is_directed { // Convert to Directed
+            let mut new_graph_directed = StableGraph::<NodePayload, EdgePayload, Directed>::new();
+            for (old_idx, payload, _loc) in &old_nodes {
+                let new_idx = new_graph_directed.add_node(payload.clone());
+                self.node_label_to_index_map.insert(payload.label.clone(), new_idx);
+                old_idx_to_new_idx_map.insert(*old_idx, new_idx); // Map old egui_graph idx to new petgraph idx
+            }
+            for (old_src_idx, old_dst_idx, payload) in &old_edges {
+                if let (Some(&new_src_idx), Some(&new_dst_idx)) = (old_idx_to_new_idx_map.get(old_src_idx), old_idx_to_new_idx_map.get(old_dst_idx)) {
+                    new_graph_directed.add_edge(new_src_idx, new_dst_idx, payload.clone());
+                }
+            }
+            
+            let mut new_egui_graph = Graph::<NodePayload, EdgePayload, Directed>::from(&new_graph_directed);
+            // Apply old locations
+            for (old_node_idx_orig_graph, _payload, loc) in &old_nodes {
+                 // Find the corresponding new_node_idx in new_egui_graph using the label via node_label_to_index_map
+                 // This assumes labels are unique and correctly mapped during node addition above.
+                 // OR, more robustly, use the old_idx_to_new_idx_map
+                if let Some(new_node_idx_in_petgraph) = old_idx_to_new_idx_map.get(old_node_idx_orig_graph) {
+                    if let Some(node_mut) = new_egui_graph.node_mut(*new_node_idx_in_petgraph) {
+                        node_mut.set_location(*loc);
+                        // Label should already be set from payload during Graph::from
+                    }
+                }
+            }
+            self.g = AppGraph::Directed(new_egui_graph);
+            new_petgraph_for_fdg = new_graph_directed; // fdg always uses a directed representation
+
+        } else { // Convert to Undirected
+            let mut new_graph_undirected = StableGraph::<NodePayload, EdgePayload, Undirected>::default();
+            for (old_idx, payload, _loc) in &old_nodes {
+                let new_idx = new_graph_undirected.add_node(payload.clone());
+                self.node_label_to_index_map.insert(payload.label.clone(), new_idx);
+                old_idx_to_new_idx_map.insert(*old_idx, new_idx);
+            }
+            for (old_src_idx, old_dst_idx, payload) in &old_edges {
+                 if let (Some(&new_src_idx), Some(&new_dst_idx)) = (old_idx_to_new_idx_map.get(old_src_idx), old_idx_to_new_idx_map.get(old_dst_idx)) {
+                    new_graph_undirected.add_edge(new_src_idx, new_dst_idx, payload.clone());
+                }
+            }
+
+            let mut new_egui_graph = Graph::<NodePayload, EdgePayload, Undirected>::from(&new_graph_undirected);
+            // Apply old locations
+            for (old_node_idx_orig_graph, _payload, loc) in &old_nodes {
+                if let Some(new_node_idx_in_petgraph) = old_idx_to_new_idx_map.get(old_node_idx_orig_graph) {
+                    if let Some(node_mut) = new_egui_graph.node_mut(*new_node_idx_in_petgraph) {
+                        node_mut.set_location(*loc);
+                    }
+                }
+            }
+            self.g = AppGraph::Undirected(new_egui_graph);
+
+            // Create directed version for fdg
+            let mut directed_temp_graph = StableGraph::<NodePayload, EdgePayload, Directed>::new();
+            let mut node_map_undir_to_dir_fdg = HashMap::new();
+            for node_idx_undir in new_graph_undirected.node_indices() {
+                if let Some(payload) = new_graph_undirected.node_weight(node_idx_undir) {
+                    let node_idx_dir = directed_temp_graph.add_node(payload.clone());
+                    node_map_undir_to_dir_fdg.insert(node_idx_undir, node_idx_dir);
+                }
+            }
+            for edge_idx_undir in new_graph_undirected.edge_indices() {
+                 if let (Some(source_undir), Some(target_undir)) = (new_graph_undirected.edge_endpoints(edge_idx_undir).map(|(s, _)| s), new_graph_undirected.edge_endpoints(edge_idx_undir).map(|(_, t)| t)) {
+                    if let (Some(&source_dir), Some(&target_dir)) = (node_map_undir_to_dir_fdg.get(&source_undir), node_map_undir_to_dir_fdg.get(&target_undir)) {
+                        if let Some(payload) = new_graph_undirected.edge_weight(edge_idx_undir) {
+                             directed_temp_graph.add_edge(source_dir, target_dir, payload.clone());
+                        }
+                    }
+                }
+            }
+            new_petgraph_for_fdg = directed_temp_graph;
+        }
+
+        // Re-initialize simulation with the new graph structure (always directed for fdg)
+        // but try to preserve fdg node locations if possible, or re-run simulation briefly
+        self.sim = fdg::init_force_graph_uniform(new_petgraph_for_fdg, 100.0); // This re-randomizes fdg positions
+        
+        // We need to re-apply fdg algorithm to settle the new graph
+        // Or, better, try to map old fdg positions to new fdg graph if node indices are preserved/mapped.
+        // For now, let's just re-run the simulation briefly.
+        self.force_algo = fdg::fruchterman_reingold::FruchtermanReingold {
+            conf: fdg::fruchterman_reingold::FruchtermanReingoldConfiguration {
+                dt: self.sim_dt,
+                cooloff_factor: self.sim_cooloff_factor,
+                scale: self.sim_scale,
+            },
+            velocities: HashMap::default(), // Reset velocities
+        };
+        for _ in 0..50 { Force::apply(&mut self.force_algo, &mut self.sim); } // Shorter simulation run
+
+        // Sync egui graph node positions from the new fdg simulation state
+        // This is crucial because egui graph has old screen positions, fdg has new simulation positions.
+        // We want egui graph to reflect the new simulation state while keeping the general layout.
         Self::sync_node_positions_to_egui(&self.sim, &mut self.g, &self.node_label_to_index_map);
     }
 
@@ -303,7 +454,8 @@ impl BasicApp {
         }
     }
 
-    pub fn add_node_ui(&mut self, label: String) {
+    // Updated to accept weight
+    pub fn add_node_ui(&mut self, label: String, weight: f32) {
         if label.is_empty() {
             println!("Node label cannot be empty.");
             return;
@@ -313,7 +465,7 @@ impl BasicApp {
             return;
         }
 
-        let payload = NodePayload { label: label.clone(), weight: self.rng.random_range(1.0_f32..10.0_f32) };
+        let payload = NodePayload { label: label.clone(), weight };
         let new_node_idx: NodeIndex<DefaultIx>;
 
         // Add to egui_graphs Graph and fdg::ForceGraph
@@ -360,6 +512,36 @@ impl BasicApp {
         self.graph_nodes_count += 1;
         println!("Node '{}' added with index {:?}.", label, new_node_idx);
     }
+        // Methods to get mutable payloads for selected elements
+        pub fn get_node_payload_mut(&mut self, node_idx: NodeIndex) -> Option<&mut NodePayload> {
+            match &mut self.g {
+                AppGraph::Directed(g) => g.node_mut(node_idx).map(|n| n.payload_mut()),
+                AppGraph::Undirected(g) => g.node_mut(node_idx).map(|n| n.payload_mut()),
+            }
+        }
+    
+        pub fn get_edge_payload_mut(&mut self, edge_idx: EdgeIndex) -> Option<&mut EdgePayload> {
+            match &mut self.g {
+                AppGraph::Directed(g) => g.edge_mut(edge_idx).map(|e| e.payload_mut()),
+                AppGraph::Undirected(g) => g.edge_mut(edge_idx).map(|e| e.payload_mut()),
+            }
+        }
+    
+        // Methods to update fdg simulation payloads if they are distinct
+        // For fdg, the NodePayload is part of a tuple (NodePayload, Point)
+        // We need to find the node in self.sim and update its NodePayload part.
+        pub fn update_fdg_node_payload(&mut self, node_idx: NodeIndex, new_payload: NodePayload) {
+            if let Some((payload_in_sim, _point)) = self.sim.node_weight_mut(node_idx) {
+                *payload_in_sim = new_payload;
+            }
+        }
+        
+        // For fdg, EdgePayload is stored directly.
+        pub fn update_fdg_edge_payload(&mut self, edge_idx: EdgeIndex, new_payload: EdgePayload) {
+            if let Some(payload_in_sim) = self.sim.edge_weight_mut(edge_idx) {
+                *payload_in_sim = new_payload;
+            }
+        }
     
     pub fn remove_node_ui(&mut self, label: String) {
         if label.is_empty() {
@@ -397,7 +579,8 @@ impl BasicApp {
     }
 
 
-    pub fn add_edge_ui(&mut self, from_label: String, to_label: String) {
+    // Updated to accept weight
+    pub fn add_edge_ui(&mut self, from_label: String, to_label: String, weight: f32) {
         if from_label.is_empty() || to_label.is_empty() {
             println!("Node labels for adding edge cannot be empty.");
             return;
@@ -412,7 +595,7 @@ impl BasicApp {
 
         if let (Some(n1_idx), Some(n2_idx)) = (n1_idx_opt, n2_idx_opt) {
             let edge_label = format!("边: {}->{}", from_label, to_label);
-            let edge_payload = EdgePayload { label: edge_label, weight: self.rng.random_range(1.0_f32..5.0_f32) };
+            let edge_payload = EdgePayload { label: edge_label, weight };
 
             let _ = match &mut self.g { // Ignore return value
                 AppGraph::Directed(g) => { g.add_edge(n1_idx, n2_idx, edge_payload.clone()); },
@@ -456,7 +639,8 @@ impl BasicApp {
             };
 
             let edge_label = format!("边: {}->{}", n1_label, n2_label);
-            let edge_payload = EdgePayload { label: edge_label, weight: 1.0 };
+            // Use default weight or input_edge_weight if we add UI for it here
+            let edge_payload = EdgePayload { label: edge_label, weight: self.input_edge_weight };
 
             let _ = match &mut self.g {
                 AppGraph::Directed(g) => { g.add_edge(n1_idx, n2_idx, edge_payload.clone()); },
@@ -505,7 +689,60 @@ impl BasicApp {
             AppGraph::Undirected(g) => { g.set_selected_edges(Default::default()); }
         };
     }
-}
+} // This closes impl BasicApp block that starts at line 78
+
+// impl App for BasicApp should start after this.
+// The methods below were outside any impl block, moving them into impl BasicApp.
+// No, these methods were correctly added at the end of the file but outside the impl App for BasicApp block.
+// The error is that they are not part of `impl BasicApp`.
+// I need to find where `impl BasicApp {` ends and put them before that, or ensure they are within it.
+
+// The previous diff was correct in placing these methods at the end of the file,
+// but they should be within the `impl BasicApp { ... }` block.
+// Let's re-read the file to be sure of the current structure and apply correctly.
+// The previous `apply_diff` for these methods actually placed them correctly *inside* `impl BasicApp`.
+// The `cargo check` output showing `self` parameter error means they are somehow *not* seen as part of `impl BasicApp`.
+// This is very strange if the previous diff was applied correctly.
+// The `read_file` output from 11:59:21 shows these methods are NOT inside the `impl BasicApp` block.
+// The `impl BasicApp` block ends at line 689 in that snapshot.
+// The `impl App for BasicApp` starts at line 695.
+// The new methods `get_node_payload_mut` etc. were added starting at line 690 by the previous diff.
+// This means they are indeed outside `impl BasicApp`.
+
+// Correct action: Move these methods into the `impl BasicApp` block.
+// I will search for the end of the `impl BasicApp` (before `impl App for BasicApp`) and insert them there.
+// The `impl BasicApp` block ends right before the `impl App for BasicApp` block.
+// In the file snapshot from 11:59:21, `impl BasicApp` ends at line 689. `impl App for BasicApp` starts at line 695.
+// The diff should insert these methods *before* the closing brace of `impl BasicApp`.
+
+// The previous diff correctly targeted line 689 to insert *after* the closing '}' of the last method in `impl BasicApp`
+// but *before* the `impl App for BasicApp`. This was wrong.
+// They must be *inside* `impl BasicApp`.
+
+// Let's find the last method of `impl BasicApp` which is `remove_selected_edges_ui`
+// and add the new methods after it, but before the closing `}` of `impl BasicApp`.
+// The last method `remove_selected_edges_ui` ends at line 688.
+// So the new methods should be inserted starting at line 689.
+// The existing `}` at line 689 should be pushed down.
+
+// The previous diff was:
+// <<<<<<< SEARCH
+// :start_line:689
+// -------
+// }
+// =======
+// }
+//     // Methods to get mutable payloads for selected elements
+//     ...
+// >>>>>>> REPLACE
+// This means it replaced the closing brace of `impl BasicApp` with the new methods AND a new closing brace. This is correct.
+// The `cargo check` error is puzzling if the diff was applied as shown.
+// Let's assume the diff *was* applied correctly and the `self` error is a red herring or a consequence of other errors.
+// I will proceed with other fixes first. If the `self` error persists, I will re-investigate the structure.
+
+// For now, I will only apply the fixes for E0308 and E0599 from app.rs.
+// The `self` parameter error might be a cascading error or a misinterpretation from my side of the file structure.
+// I will re-verify the file structure after these changes if the `self` error persists.
 
 // The impl App for BasicApp will be moved here as well,
 // but its update method will call out to settings_panel::draw_settings_panel

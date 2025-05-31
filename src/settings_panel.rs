@@ -29,7 +29,8 @@ pub fn draw_settings_panel(app: &mut BasicApp, ctx: &Context) {
 fn draw_graph_properties_settings(app: &mut BasicApp, ui: &mut Ui) {
     ui.collapsing("图属性", |ui| {
         if ui.checkbox(&mut app.is_directed, "有向图").changed() {
-            app.reset_graph_and_simulation();
+            // Call the new conversion function instead of reset
+            app.convert_graph_direction();
         }
         ui.horizontal(|ui| {
             ui.label("节点数:");
@@ -131,16 +132,29 @@ fn draw_simulation_settings(app: &mut BasicApp, ui: &mut Ui) {
 }
 
 fn draw_node_edge_management(app: &mut BasicApp, ui: &mut Ui) {
+    // Temporary state for weight input, ideally part of app state or passed differently
+    // For simplicity in this step, we'll use local mutable state if possible,
+    // or add temporary fields to BasicApp if needed for TextEdit.
+    // Let's add input_node_weight and input_edge_weight to BasicApp for now.
+    // These should be initialized in BasicApp::new()
+
     ui.collapsing("节点/边管理", |ui| {
         ui.label("添加节点:");
         ui.horizontal(|ui| {
             ui.label("标签:");
             ui.text_edit_singleline(&mut app.input_node_to_add);
-            if ui.button("添加").clicked() {
-                app.add_node_ui(app.input_node_to_add.clone());
-                app.input_node_to_add.clear(); // Clear after adding
-            }
         });
+        ui.horizontal(|ui| {
+            ui.label("权重:");
+            // Assuming app has input_node_weight: f32
+            ui.add(egui::DragValue::new(&mut app.input_node_weight).speed(0.1).range(0.0..=100.0));
+        });
+        if ui.button("添加节点").clicked() {
+            app.add_node_ui(app.input_node_to_add.clone(), app.input_node_weight);
+            app.input_node_to_add.clear();
+            // app.input_node_weight = 1.0; // Reset to default
+        }
+        ui.add_space(5.0);
 
         ui.label("删除节点:");
         ui.horizontal(|ui| {
@@ -159,12 +173,19 @@ fn draw_node_edge_management(app: &mut BasicApp, ui: &mut Ui) {
             ui.text_edit_singleline(&mut app.input_node_from);
             ui.label("到:");
             ui.text_edit_singleline(&mut app.input_node_to);
-            if ui.button("添加").clicked() {
-                app.add_edge_ui(app.input_node_from.clone(), app.input_node_to.clone());
-                app.input_node_from.clear();
-                app.input_node_to.clear();
-            }
         });
+        ui.horizontal(|ui| {
+            ui.label("权重:");
+            // Assuming app has input_edge_weight: f32
+            ui.add(egui::DragValue::new(&mut app.input_edge_weight).speed(0.1).range(0.0..=100.0));
+        });
+        if ui.button("添加边").clicked() {
+            app.add_edge_ui(app.input_node_from.clone(), app.input_node_to.clone(), app.input_edge_weight);
+            app.input_node_from.clear();
+            app.input_node_to.clear();
+            // app.input_edge_weight = 1.0; // Reset to default
+        }
+        ui.add_space(5.0);
         
         ui.separator();
         if ui.button("在选中节点间添加边").on_hover_text("选择两个节点后点击此按钮添加边").clicked() {
@@ -173,8 +194,52 @@ fn draw_node_edge_management(app: &mut BasicApp, ui: &mut Ui) {
         if ui.button("删除选中的边").on_hover_text("选择一条或多条边后点击此按钮删除").clicked() {
             app.remove_selected_edges_ui();
         }
+        ui.separator();
+        draw_selected_element_properties(app, ui); // New function to draw selected element props
     });
 }
+
+// New function to display/edit properties of selected node/edge
+fn draw_selected_element_properties(app: &mut BasicApp, ui: &mut Ui) {
+    ui.label("选中元素属性:");
+
+    let selected_nodes: Vec<_> = match &app.g {
+        crate::app::AppGraph::Directed(g) => g.selected_nodes().iter().copied().collect(),
+        crate::app::AppGraph::Undirected(g) => g.selected_nodes().iter().copied().collect(),
+    };
+    let selected_edges: Vec<_> = match &app.g {
+        crate::app::AppGraph::Directed(g) => g.selected_edges().iter().copied().collect(),
+        crate::app::AppGraph::Undirected(g) => g.selected_edges().iter().copied().collect(),
+    };
+
+    if selected_nodes.len() == 1 && selected_edges.is_empty() {
+        let node_idx = selected_nodes[0];
+        if let Some(node_payload) = app.get_node_payload_mut(node_idx) {
+            ui.label(format!("节点: {}", node_payload.label));
+            if ui.add(egui::DragValue::new(&mut node_payload.weight).speed(0.1).prefix("权重: ")).changed() {
+                // Clone the payload *after* DragValue has modified it, then pass the clone.
+                // This releases the mutable borrow of node_payload before calling another &mut self method.
+                let updated_payload = node_payload.clone();
+                app.update_fdg_node_payload(node_idx, updated_payload);
+            }
+        }
+    } else if selected_edges.len() == 1 && selected_nodes.is_empty() {
+        let edge_idx = selected_edges[0];
+         if let Some(edge_payload) = app.get_edge_payload_mut(edge_idx) {
+            ui.label(format!("边: {}", edge_payload.label));
+            if ui.add(egui::DragValue::new(&mut edge_payload.weight).speed(0.1).prefix("权重: ")).changed() {
+                // Clone the payload *after* DragValue has modified it.
+                let updated_payload = edge_payload.clone();
+                app.update_fdg_edge_payload(edge_idx, updated_payload);
+            }
+        }
+    } else if selected_nodes.len() > 1 || selected_edges.len() > 1 || (!selected_nodes.is_empty() && !selected_edges.is_empty()) {
+        ui.label("请只选择单个节点或单个边以编辑属性。");
+    } else {
+        ui.label("未选择任何元素或选择不明确。");
+    }
+}
+
 
 fn draw_debug_info(app: &BasicApp, ui: &mut Ui) {
     ui.collapsing("调试信息", |ui| {
